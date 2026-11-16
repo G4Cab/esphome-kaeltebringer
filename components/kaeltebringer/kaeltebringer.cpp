@@ -5,12 +5,53 @@ namespace kaeltebringer {
 
   static const char *const TAG = "kaeltebringer";
 
+  // Index = Wert für vswing_fix (Byte 32, Bit 0-2). Index 0 = Swing (keine feste Position).
+  // Falls die Lamelle bei einer Option an der falschen Stelle steht, hier die Reihenfolge anpassen.
+  static const char *const VPOS_NAMES[6] = {"Swing", "Ganz oben", "Oben", "Mitte", "Unten", "Ganz unten"};
+
   void KaeltebringerClimate::setup() {
     // This will be called by App.setup()
     this->set_supported_custom_fan_modes({"Turbo", "Mute", "Automatic", "1", "2", "3", "4", "5"});
   }
 
   void KaeltebringerClimate::set_beep_enabled(bool enabled) { this->beep_enabled_ = enabled; }
+
+  void KaeltebringerClimate::set_vertical_position(const std::string &position) {
+    // Ohne gültigen Status würde ein Befehl das Gerät ausschalten (alle Felder 0)
+    if (m_get_cmd_resp.data.header != 0xBB) {
+      ESP_LOGW(TAG, "Noch kein Status von der Klima empfangen, Lamellenposition nicht gesetzt");
+      return;
+    }
+
+    get_cmd_resp_t get_cmd_resp = {0};
+    memcpy(get_cmd_resp.raw, m_get_cmd_resp.raw, sizeof(get_cmd_resp.raw));
+
+    if (position == VPOS_NAMES[0]) {
+      this->vswing_fix_ = 0;
+      get_cmd_resp.data.vswing = 1;
+    } else {
+      int idx = -1;
+      for (int i = 1; i < 6; i++) {
+        if (position == VPOS_NAMES[i]) idx = i;
+      }
+      if (idx < 0) {
+        ESP_LOGW(TAG, "Unbekannte Lamellenposition: %s", position.c_str());
+        return;
+      }
+      this->vswing_fix_ = idx;
+      get_cmd_resp.data.vswing = 0;
+    }
+
+    build_set_cmd(&get_cmd_resp);
+    ready_to_send_set_cmd_flag = true;
+    update();
+  }
+
+  std::string KaeltebringerClimate::get_vertical_position() const {
+    if (this->vswing_fix_ >= 1 && this->vswing_fix_ <= 5) return VPOS_NAMES[this->vswing_fix_];
+    if (m_get_cmd_resp.data.vswing) return VPOS_NAMES[0];
+    return "";
+  }
 
   void KaeltebringerClimate::set_current_temperature(float current_temperature) {
     if (this->current_temperature == current_temperature) return;
@@ -97,7 +138,8 @@ namespace kaeltebringer {
         break;
     }
 
-    m_set_cmd.data.vswing = get_cmd_resp->data.vswing ? 0x07 : 0x00;
+    m_set_cmd.data.vswing_fix = this->vswing_fix_;
+    m_set_cmd.data.vswing = (this->vswing_fix_ == 0 && get_cmd_resp->data.vswing) ? 0x07 : 0x00;
     m_set_cmd.data.hswing = get_cmd_resp->data.hswing;
 
     m_set_cmd.data.half_degree = 0;
@@ -199,10 +241,12 @@ namespace kaeltebringer {
           get_cmd_resp.data.vswing = 0;
           break;
         case climate::CLIMATE_SWING_BOTH:
+          this->vswing_fix_ = 0;
           get_cmd_resp.data.hswing = 1;
           get_cmd_resp.data.vswing = 1;
           break;
         case climate::CLIMATE_SWING_VERTICAL:
+          this->vswing_fix_ = 0;          
           get_cmd_resp.data.hswing = 0;
           get_cmd_resp.data.vswing = 1;
           break;
@@ -319,6 +363,9 @@ namespace kaeltebringer {
 
           ESP_LOGD(TAG, "fan %02X", m_get_cmd_resp.data.fan);
           ESP_LOGD(TAG, "mode %02X", m_get_cmd_resp.data.mode);
+          ESP_LOGD(TAG, "vswing_fix=%d vswing_mv=%d hswing_fix=%d hswing_mv=%d",
+                   m_get_cmd_resp.data.vswing_fix, m_get_cmd_resp.data.vswing_mv,
+                   m_get_cmd_resp.data.hswing_fix, m_get_cmd_resp.data.hswing_mv);
           this->set_target_temperature(float(m_get_cmd_resp.data.temp + 16));
           this->set_current_temperature(curr_temp);
           if (this->is_changed)
